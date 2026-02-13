@@ -1,0 +1,26 @@
+{
+  "id": "ACz2Xsx2jwm62Wtr6cCVDQ",
+  "version": "1.0.0",
+  "package": {
+    "server": {
+      "launch": "dist/main.js",
+      "deploy": [
+        "dist"
+      ],
+      "node_modules": [
+        "node_modules"
+      ]
+    }
+  },
+  "permissions": {
+    "community": {
+      "ManageRoles": true
+    },
+    "channel": {
+      "CreateMessage": true,
+      "CreateMessageMention": true,
+      "ViewMessageHistory": true,
+      "View": true
+    }
+  }
+}

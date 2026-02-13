@@ -1,0 +1,24 @@
+{
+  "name": "appl-e",
+  "version": "1.0.0",
+  "description": "APPL-E – Bot para Root: notificações de live (YouTube/Twitch), welcome/goodbye, atribuição de cargos.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "bot": "rootsdk start devhost",
+    "dev": "tsc --watch"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@rootsdk/server-bot": "latest",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@rootsdk/dev-tools": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}
