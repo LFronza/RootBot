@@ -29,16 +29,18 @@ import {
   scheduleNextStreamCheck,
 } from "./streams.js";
 import { registerStreamCommands } from "./commands.js";
+import { registerAutoRoleReactions } from "./autorole.js";
+import { setRuntimeLanguage } from "./locale.js";
 
 function mapGlobalSettingsToBotSettings(
   globalSettings: RootBotStartState["globalSettings"]
 ): RootBotSettings {
-  if (!globalSettings || typeof globalSettings !== "object") {
-    return { language: "pt" };
+  if (!globalSettings) {
+    return { language: "en" };
   }
-  const g = globalSettings as Record<string, unknown>;
   return {
-    language: stringOrUndefined(g.language) || "pt",
+    language: readGlobalStringSetting(globalSettings, "language") || "en",
+    commandPrefix: readGlobalStringSetting(globalSettings, "commandPrefix"),
   };
 }
 
@@ -47,13 +49,57 @@ function stringOrUndefined(v: unknown): string | undefined {
   return undefined;
 }
 
+function readGlobalStringSetting(
+  globalSettings: RootBotStartState["globalSettings"],
+  key: string
+): string | undefined {
+  if (!globalSettings || typeof globalSettings !== "object") return undefined;
+  const gs = globalSettings as Record<string, unknown>;
+  const direct = gs[key];
+  if (typeof direct === "string") return direct;
+  if (Array.isArray(direct) && typeof direct[0] === "string") return direct[0];
+
+  for (const groupValue of Object.values(gs)) {
+    if (!groupValue || typeof groupValue !== "object") continue;
+    const nested = (groupValue as Record<string, unknown>)[key];
+    if (typeof nested === "string") return nested;
+    if (Array.isArray(nested) && typeof nested[0] === "string") return nested[0];
+  }
+  return undefined;
+}
+
+async function syncGlobalSettingsToAppData(
+  globalSettings: RootBotStartState["globalSettings"]
+): Promise<void> {
+  const language = readGlobalStringSetting(globalSettings, "language")?.toLowerCase();
+  const prefix = stringOrUndefined(readGlobalStringSetting(globalSettings, "commandPrefix")?.trim());
+  const updates: Array<{ key: string; value: string }> = [];
+  if (language === "pt" || language === "en") updates.push({ key: "config:language", value: language });
+  if (prefix) updates.push({ key: "config:commandPrefix", value: prefix });
+
+  if (updates.length > 0) {
+    await rootServer.dataStore.appData.set(updates);
+  }
+}
+
 async function onStarting(state: RootBotStartState): Promise<void> {
   const settings = mapGlobalSettingsToBotSettings(state.globalSettings);
+  if (settings.language === "pt" || settings.language === "en") {
+    setRuntimeLanguage(settings.language);
+  }
+  await syncGlobalSettingsToAppData(state.globalSettings);
 
   registerWelcomeGoodbye(settings);
   registerAutoRole(settings);
   registerStreamChecker(settings);
   registerStreamCommands(settings);
+  registerAutoRoleReactions();
+
+  rootServer.globalSettings?.on("update", (event) => {
+    void syncGlobalSettingsToAppData(event.current).catch((err) => {
+      console.error("[Settings] Failed syncing global settings:", err);
+    });
+  });
 
   const hasYoutube = Boolean(process.env.YOUTUBE_API_KEY);
   const hasTwitch = Boolean(process.env.TWITCH_CLIENT_ID && process.env.TWITCH_CLIENT_SECRET);

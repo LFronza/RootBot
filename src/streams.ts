@@ -11,16 +11,26 @@ import {
   JobInterval,
 } from "@rootsdk/server-bot";
 import type { RootBotSettings } from "./types.js";
+import { getRuntimeLanguage } from "./locale.js";
 import {
-  STREAMERS_KEY,
   STREAM_JOB_TAG,
   STREAM_JOB_RESOURCE_ID,
-  type TrackedStreamer,
 } from "./types.js";
 import { t } from "./i18n/index.js";
+import {
+  getCommunityCatalogEntries,
+  getCommunityIdForStreams,
+  migrateLegacyStreamersIfNeeded,
+  streamStateKey,
+} from "./streamRegistry.js";
 
 const POLL_INTERVAL_MINUTES = 5;
+const CONTENT_CHECK_INTERVAL_MINUTES = 20;
+const LIVE_RECHECK_WHEN_LATE_MINUTES = 2;
+const LIVE_FALLBACK_CHECK_MINUTES = 30;
+const MAX_SCHEDULE_AHEAD_MS = 365 * 24 * 60 * 60 * 1000;
 const KEY_VALUE = rootServer.dataStore.appData;
+const YT_QUOTA_BLOCKED_UNTIL_KEY = "youtube:quotaBlockedUntil";
 
 export function registerStreamChecker(settings: RootBotSettings): void {
   rootServer.jobScheduler.on(JobScheduleEvent.Job, (data) => {
@@ -47,11 +57,14 @@ export function scheduleNextStreamCheck(): void {
   });
 }
 
-const STATE_KEY = "streamer_states";
-
 interface StreamerState {
   lastLive: boolean;
   lastStreamId?: string;
+  lastVideoId?: string;
+  lastPremiereId?: string;
+  lastContentCheckAt?: number;
+  pendingScheduledStartAt?: number;
+  nextLiveCheckAt?: number;
 }
 
 export async function getStreamOverrides(): Promise<{
@@ -67,143 +80,207 @@ export async function getStreamOverrides(): Promise<{
 }
 
 export async function runStreamCheck(settings: RootBotSettings): Promise<void> {
-  const overrides = await getStreamOverrides();
-  const channelId = overrides.channelId;
-  if (!channelId) return;
+  try {
+    const runtimeLanguage = await getRuntimeLanguage(settings.language);
+    await migrateLegacyStreamersIfNeeded();
 
-  const youtubeKey = process.env.YOUTUBE_API_KEY;
-  const twitchId = process.env.TWITCH_CLIENT_ID;
-  const twitchSecret = process.env.TWITCH_CLIENT_SECRET;
+    const overrides = await getStreamOverrides();
+    const channelId = overrides.channelId;
+    if (!channelId) return;
 
-  const hasYoutube = Boolean(youtubeKey);
-  const hasTwitch = Boolean(twitchId && twitchSecret);
+    const youtubeKey = process.env.YOUTUBE_API_KEY;
+    const twitchId = process.env.TWITCH_CLIENT_ID;
+    const twitchSecret = process.env.TWITCH_CLIENT_SECRET;
 
-  if (!hasYoutube && !hasTwitch) return;
+    const hasTwitch = Boolean(twitchId && twitchSecret);
+    const hasYoutubeApi = Boolean(youtubeKey);
+    let youtubeQuotaBlocked = hasYoutubeApi ? await isYouTubeQuotaBlocked() : true;
 
-  // No more streamers from settings
-  const settingStreamers: TrackedStreamer[] = [];
+    const allStreamers = await getCommunityCatalogEntries();
 
-  // Load streamers from DB
-  const streamersJson = await KEY_VALUE.get<string>(STREAMERS_KEY);
-  const dbStreamers: TrackedStreamer[] = streamersJson
-    ? (JSON.parse(streamersJson) as TrackedStreamer[])
-    : [];
+    if (allStreamers.length === 0) return;
+    if (!hasTwitch && !allStreamers.some((s) => s.platform === "youtube")) return;
 
-  // Merge lists (priority to DB or just unique set?)
-  // Let's treat them as a set based on platform+externalId
-  const allStreamers = [...settingStreamers];
-  for (const s of dbStreamers) {
-    if (!allStreamers.some(existing => existing.platform === s.platform && existing.externalId === s.externalId)) {
-      allStreamers.push(s);
+    const communityId = await getCommunityIdForStreams();
+    const stateStorageKey = streamStateKey(communityId);
+    const stateJson = await KEY_VALUE.get<string>(stateStorageKey);
+    const stateMap: Record<string, StreamerState> = stateJson
+      ? JSON.parse(stateJson)
+      : {};
+
+    const mention = overrides.roleId ? `<@&${overrides.roleId}>` : "";
+    const twitchToken = hasTwitch
+      ? await getTwitchAppToken(twitchId!, twitchSecret!)
+      : null;
+
+    let stateChanged = false;
+    const now = Date.now();
+
+    for (const s of allStreamers) {
+      const stateKey = `${s.platform}:${s.externalId}`;
+      const state = stateMap[stateKey] ?? { lastLive: false };
+
+      try {
+        if (s.platform === "youtube") {
+          const shouldCheckLiveNow =
+            !state.nextLiveCheckAt || now >= state.nextLiveCheckAt;
+          let live: { isLive: boolean; url?: string; title?: string; videoId?: string } | null = null;
+
+          if (shouldCheckLiveNow) {
+            live = await checkYouTubeLive("", s.externalId);
+            if (live.isLive && !state.lastLive) {
+              const text = formatStreamMessage(
+                runtimeLanguage,
+                "YouTube",
+                s.displayName,
+                live.url ?? `https://youtube.com/channel/${s.externalId}`,
+                live.title,
+                mention,
+                overrides.message
+              );
+              await rootServer.community.channelMessages.create({
+                channelId: channelId as ChannelGuid,
+                content: text,
+              });
+            }
+          }
+
+          const shouldCheckContent =
+            !state.lastContentCheckAt ||
+            now - state.lastContentCheckAt >= CONTENT_CHECK_INTERVAL_MINUTES * 60 * 1000;
+
+          if (hasYoutubeApi && !youtubeQuotaBlocked && shouldCheckContent) {
+            const latest = await checkYouTubeLatestContent(youtubeKey!, s.externalId);
+            if (latest.kind === "video" && latest.videoId && state.lastVideoId !== latest.videoId) {
+              await rootServer.community.channelMessages.create({
+                channelId: channelId as ChannelGuid,
+                content: formatYouTubeContentMessage(
+                  runtimeLanguage,
+                  s.displayName,
+                  latest.url ?? `https://youtube.com/channel/${s.externalId}`,
+                  latest.title,
+                  mention,
+                  "video"
+                ),
+              });
+              state.lastVideoId = latest.videoId;
+              stateChanged = true;
+            }
+
+            if (latest.kind === "premiere" && latest.videoId && state.lastPremiereId !== latest.videoId) {
+              await rootServer.community.channelMessages.create({
+                channelId: channelId as ChannelGuid,
+                content: formatYouTubeContentMessage(
+                  runtimeLanguage,
+                  s.displayName,
+                  latest.url ?? `https://youtube.com/channel/${s.externalId}`,
+                  latest.title,
+                  mention,
+                  "premiere"
+                ),
+              });
+              state.lastPremiereId = latest.videoId;
+              stateChanged = true;
+            }
+
+            if (latest.kind === "premiere" && latest.scheduledStartAt) {
+              const aheadMs = latest.scheduledStartAt - now;
+              if (aheadMs > 0 && aheadMs <= MAX_SCHEDULE_AHEAD_MS) {
+                if (state.pendingScheduledStartAt !== latest.scheduledStartAt) {
+                  state.pendingScheduledStartAt = latest.scheduledStartAt;
+                  state.nextLiveCheckAt = latest.scheduledStartAt;
+                  stateChanged = true;
+                }
+              } else if (aheadMs > MAX_SCHEDULE_AHEAD_MS && state.pendingScheduledStartAt) {
+                state.pendingScheduledStartAt = undefined;
+                stateChanged = true;
+              }
+            }
+
+            if (!youtubeQuotaBlocked) {
+              youtubeQuotaBlocked = await isYouTubeQuotaBlocked();
+            }
+
+            state.lastContentCheckAt = now;
+            stateChanged = true;
+          }
+
+          if (live) {
+            if (state.lastLive !== live.isLive || state.lastStreamId !== live.videoId) {
+              state.lastLive = live.isLive;
+              state.lastStreamId = live.videoId;
+              stateChanged = true;
+            }
+
+            if (live.isLive) {
+              const nextWhileLive = now + POLL_INTERVAL_MINUTES * 60 * 1000;
+              if (state.nextLiveCheckAt !== nextWhileLive) {
+                state.nextLiveCheckAt = nextWhileLive;
+                state.pendingScheduledStartAt = undefined;
+                stateChanged = true;
+              }
+            } else {
+              let nextCheck = now + LIVE_FALLBACK_CHECK_MINUTES * 60 * 1000;
+              if (state.pendingScheduledStartAt) {
+                if (now >= state.pendingScheduledStartAt) {
+                  nextCheck = now + LIVE_RECHECK_WHEN_LATE_MINUTES * 60 * 1000;
+                } else {
+                  nextCheck = state.pendingScheduledStartAt;
+                }
+              }
+              if (state.nextLiveCheckAt !== nextCheck) {
+                state.nextLiveCheckAt = nextCheck;
+                stateChanged = true;
+              }
+            }
+          }
+          stateMap[stateKey] = state;
+        }
+
+        if (s.platform === "twitch" && hasTwitch && twitchToken) {
+          const live = await checkTwitchLive(twitchId!, twitchToken, s.externalId);
+          if (live.isLive && !state.lastLive) {
+            const text = formatStreamMessage(
+              runtimeLanguage,
+              "Twitch",
+              s.displayName,
+              live.url ?? `https://twitch.tv/${s.externalId}`,
+              live.title,
+              mention,
+              overrides.message
+            );
+            await rootServer.community.channelMessages.create({
+              channelId: channelId as ChannelGuid,
+              content: text,
+            });
+          }
+          if (state.lastLive !== live.isLive || state.lastStreamId !== live.streamId) {
+            state.lastLive = live.isLive;
+            state.lastStreamId = live.streamId;
+            stateChanged = true;
+          }
+          stateMap[stateKey] = state;
+        }
+      } catch (err) {
+        if (err instanceof RootApiException) {
+          console.error(`[Stream] RootApiException checking ${s.platform}/${s.externalId}:`, err.errorCode);
+        } else if (err instanceof Error) {
+          console.error(`[Stream] Error checking ${s.platform}/${s.externalId}:`, err.message);
+        } else {
+          console.error(`[Stream] Unknown error checking ${s.platform}/${s.externalId}:`, err);
+        }
+      }
     }
-  }
 
-  if (allStreamers.length === 0) return;
-
-  // Load previous state
-  const stateJson = await KEY_VALUE.get<string>(STATE_KEY);
-  const stateMap: Record<string, StreamerState> = stateJson
-    ? JSON.parse(stateJson)
-    : {};
-
-  const mention = overrides.roleId ? `<@&${overrides.roleId}>` : "";
-
-  let stateChanged = false;
-
-  for (const s of allStreamers) {
-    const state = stateMap[s.externalId] ?? { lastLive: false };
-
-    try {
-      if (s.platform === "youtube" && hasYoutube) {
-        const live = await checkYouTubeLive(youtubeKey!, s.externalId);
-        if (live.isLive && !state.lastLive) {
-          const text = formatStreamMessage(
-            settings.language,
-            "YouTube",
-            s.displayName,
-            live.url ?? `https://youtube.com/channel/${s.externalId}`,
-            live.title,
-            mention,
-            overrides.message
-          );
-          await rootServer.community.channelMessages.create({
-            channelId: channelId as ChannelGuid,
-            content: text,
-          });
-        }
-        if (state.lastLive !== live.isLive || state.lastStreamId !== live.videoId) {
-          state.lastLive = live.isLive;
-          state.lastStreamId = live.videoId;
-          stateMap[s.externalId] = state;
-          stateChanged = true;
-        }
-      }
-
-      if (s.platform === "twitch" && hasTwitch) {
-        const token = await getTwitchAppToken(twitchId!, twitchSecret!);
-        if (!token) continue;
-        const live = await checkTwitchLive(twitchId!, token, s.externalId);
-        if (live.isLive && !state.lastLive) {
-          const text = formatStreamMessage(
-            settings.language,
-            "Twitch",
-            s.displayName,
-            live.url ?? `https://twitch.tv/${s.externalId}`,
-            live.title,
-            mention,
-            overrides.message
-          );
-          await rootServer.community.channelMessages.create({
-            channelId: channelId as ChannelGuid,
-            content: text,
-          });
-        }
-        if (state.lastLive !== live.isLive || state.lastStreamId !== live.streamId) {
-          state.lastLive = live.isLive;
-          state.lastStreamId = live.streamId;
-          stateMap[s.externalId] = state;
-          stateChanged = true;
-        }
-      }
-    } catch (err) {
-      if (err instanceof RootApiException) {
-        console.error(`[Stream] RootApiException checking ${s.platform}/${s.externalId}:`, err.errorCode);
-      } else if (err instanceof Error) {
-        console.error(`[Stream] Error checking ${s.platform}/${s.externalId}:`, err.message);
-      } else {
-        console.error(`[Stream] Unknown error checking ${s.platform}/${s.externalId}:`, err);
-      }
+    if (stateChanged) {
+      await KEY_VALUE.set({
+        key: stateStorageKey,
+        value: JSON.stringify(stateMap),
+      });
     }
+  } finally {
+    scheduleNextStreamCheck();
   }
-
-  if (stateChanged) {
-    await KEY_VALUE.set({
-      key: STATE_KEY,
-      value: JSON.stringify(stateMap),
-    });
-  }
-
-  scheduleNextStreamCheck();
-}
-
-function parseStreamersList(input: string | undefined): TrackedStreamer[] {
-  if (!input) return [];
-  return input
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => {
-      const [platform, externalId, displayName] = line.split("|").map((s) => s.trim());
-      if (
-        (platform === "youtube" || platform === "twitch") &&
-        externalId &&
-        displayName
-      ) {
-        return { platform, externalId, displayName } as TrackedStreamer;
-      }
-      return null;
-    })
-    .filter((s): s is TrackedStreamer => s !== null);
 }
 
 function formatStreamMessage(
@@ -234,39 +311,168 @@ function formatStreamMessage(
   return parts.join("\n");
 }
 
-export async function checkYouTubeLive(
+function formatYouTubeContentMessage(
+  locale: string | undefined,
+  name: string,
+  url: string,
+  title: string | undefined,
+  mention: string,
+  kind: "video" | "premiere"
+): string {
+  const parts = [
+    kind === "video"
+      ? t(locale, "youtubeVideoAnnounce", { name })
+      : t(locale, "youtubePremiereAnnounce", { name }),
+    url,
+  ];
+  if (title) parts.push(t(locale, "streamAnnounceTitle", { title }));
+  if (mention) parts.push(mention);
+  return parts.join("\n");
+}
+
+export async function checkYouTubeLatestContent(
   apiKey: string,
   channelId: string
-): Promise<{ isLive: boolean; url?: string; title?: string; videoId?: string }> {
-  const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${channelId}&eventType=live&type=video&key=${apiKey}`;
+): Promise<{ kind: "video" | "premiere" | "none"; videoId?: string; url?: string; title?: string; scheduledStartAt?: number }> {
   try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      const error = await res.text();
-      console.error(`[YouTube] API Error for ${channelId}:`, error);
-      return { isLive: false };
+    const channelsRes = await fetch(
+      `https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id=${encodeURIComponent(channelId)}&key=${encodeURIComponent(apiKey)}`
+    );
+    if (!channelsRes.ok) {
+      await handleYouTubeQuotaError(channelId, channelsRes);
+      return { kind: "none" };
     }
-    const data = (await res.json()) as {
+    const channelsData = (await channelsRes.json()) as {
+      items?: Array<{ contentDetails?: { relatedPlaylists?: { uploads?: string } } }>;
+    };
+    const uploadsPlaylistId = channelsData.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+    if (!uploadsPlaylistId) return { kind: "none" };
+
+    const itemsRes = await fetch(
+      `https://www.googleapis.com/youtube/v3/playlistItems?part=contentDetails&playlistId=${encodeURIComponent(uploadsPlaylistId)}&maxResults=5&key=${encodeURIComponent(apiKey)}`
+    );
+    if (!itemsRes.ok) {
+      await handleYouTubeQuotaError(channelId, itemsRes);
+      return { kind: "none" };
+    }
+    const itemsData = (await itemsRes.json()) as {
+      items?: Array<{ contentDetails?: { videoId?: string } }>;
+    };
+    const videoIds = (itemsData.items ?? [])
+      .map((x) => x.contentDetails?.videoId)
+      .filter((x): x is string => Boolean(x));
+    if (videoIds.length === 0) return { kind: "none" };
+
+    const videosRes = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${encodeURIComponent(videoIds.join(","))}&key=${encodeURIComponent(apiKey)}`
+    );
+    if (!videosRes.ok) {
+      await handleYouTubeQuotaError(channelId, videosRes);
+      return { kind: "none" };
+    }
+    const videosData = (await videosRes.json()) as {
       items?: Array<{
-        id?: { videoId?: string };
-        snippet?: { title?: string };
+        id?: string;
+        snippet?: { title?: string; liveBroadcastContent?: string };
+        liveStreamingDetails?: { scheduledStartTime?: string };
       }>;
     };
-    const item = data.items?.[0];
-    if (!item?.id?.videoId) {
-      console.log(`[YouTube] No live stream found for ${channelId}`);
-      return { isLive: false };
+
+    const item = videosData.items?.find((x) => x.id && x.snippet?.liveBroadcastContent !== "live");
+    if (!item?.id) return { kind: "none" };
+    if (item.snippet?.liveBroadcastContent === "upcoming") {
+      const scheduledStartAt = item.liveStreamingDetails?.scheduledStartTime
+        ? Date.parse(item.liveStreamingDetails.scheduledStartTime)
+        : undefined;
+      return {
+        kind: "premiere",
+        videoId: item.id,
+        url: `https://youtube.com/watch?v=${item.id}`,
+        title: item.snippet?.title,
+        scheduledStartAt: Number.isFinite(scheduledStartAt) ? scheduledStartAt : undefined,
+      };
     }
     return {
-      isLive: true,
-      videoId: item.id.videoId,
-      url: `https://youtube.com/watch?v=${item.id.videoId}`,
+      kind: "video",
+      videoId: item.id,
+      url: `https://youtube.com/watch?v=${item.id}`,
       title: item.snippet?.title,
+    };
+  } catch {
+    return { kind: "none" };
+  }
+}
+
+export async function checkYouTubeLive(
+  _apiKey: string,
+  channelId: string
+): Promise<{ isLive: boolean; url?: string; title?: string; videoId?: string }> {
+  try {
+    const res = await fetch(`https://www.youtube.com/channel/${channelId}/live`, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+      },
+    });
+    if (!res.ok) {
+      return { isLive: false };
+    }
+    const finalUrl = res.url;
+    const html = await res.text();
+    const videoId =
+      finalUrl.match(/[?&]v=([\w-]{11})/)?.[1] ??
+      html.match(/"videoId":"([\w-]{11})"/)?.[1];
+    const hasLiveNowTrue = /"isLiveNow":true/.test(html);
+    const hasLiveNowFalse = /"isLiveNow":false/.test(html);
+    const hasLiveBadge = /BADGE_STYLE_TYPE_LIVE_NOW/.test(html);
+    const isLiveNow = hasLiveNowTrue || (!hasLiveNowFalse && hasLiveBadge);
+    if (!videoId || !isLiveNow) {
+      return { isLive: false };
+    }
+    const title =
+      html.match(/<meta property="og:title" content="([^"]+)"/)?.[1] ??
+      html.match(/<title>(.*?)<\/title>/)?.[1];
+    return {
+      isLive: true,
+      videoId,
+      url: `https://youtube.com/watch?v=${videoId}`,
+      title,
     };
   } catch (err) {
     console.error(`[YouTube] Fetch error for ${channelId}:`, err);
     return { isLive: false };
   }
+}
+
+async function isYouTubeQuotaBlocked(): Promise<boolean> {
+  const raw = await KEY_VALUE.get<string>(YT_QUOTA_BLOCKED_UNTIL_KEY);
+  if (!raw) return false;
+  const until = Number(raw);
+  if (!Number.isFinite(until) || Date.now() >= until) {
+    await KEY_VALUE.delete(YT_QUOTA_BLOCKED_UNTIL_KEY);
+    return false;
+  }
+  return true;
+}
+
+async function blockYouTubeQuotaUntilNextUtcDay(): Promise<void> {
+  const next = new Date();
+  next.setUTCDate(next.getUTCDate() + 1);
+  next.setUTCHours(0, 0, 0, 0);
+  await KEY_VALUE.set([{ key: YT_QUOTA_BLOCKED_UNTIL_KEY, value: String(next.getTime()) }]);
+}
+
+async function handleYouTubeQuotaError(channelId: string, res: Response): Promise<void> {
+  const body = await res.text();
+  if (body.includes("quotaExceeded")) {
+    const alreadyBlocked = await isYouTubeQuotaBlocked();
+    if (!alreadyBlocked) {
+      console.error(`[YouTube] Quota exceeded for ${channelId}. Blocking API checks until next UTC day.`);
+    }
+    await blockYouTubeQuotaUntilNextUtcDay();
+    return;
+  }
+  console.error(`[YouTube] API Error for ${channelId}:`, body);
 }
 
 export async function getTwitchAppToken(
@@ -338,6 +544,7 @@ export async function triggerStreamTest(
   userId: string,
   settings: RootBotSettings
 ): Promise<void> {
+  const runtimeLanguage = await getRuntimeLanguage(settings.language);
   const overrides = await getStreamOverrides();
   const channelId = overrides.channelId;
   const mention = overrides.roleId;
@@ -346,7 +553,7 @@ export async function triggerStreamTest(
   if (!channelId) return;
 
   const text = formatStreamMessage(
-    settings.language,
+    runtimeLanguage,
     "TestPlatform",
     "TestStreamer",
     "https://example.com/live",

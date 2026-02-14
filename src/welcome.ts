@@ -17,6 +17,7 @@ import {
 } from "@rootsdk/server-bot";
 import type { RootBotSettings } from "./types.js";
 import { t } from "./i18n/index.js";
+import { getRuntimeLanguage } from "./locale.js";
 
 const NICKNAME_CACHE_PREFIX = "member_nick:";
 
@@ -35,9 +36,11 @@ export async function triggerWelcome(
   userId: string,
   settings: RootBotSettings
 ): Promise<void> {
+  const runtimeLanguage = await getRuntimeLanguage(settings.language);
   const overrides = await getOverrides("welcome");
   let channelId = overrides.channelId ?? (await getDefaultChannelId());
-  const message = overrides.message ?? "Seja bem-vindo(a), {nickname}!";
+  const message = overrides.message ?? "Welcome, {nickname}!";
+  const image = formatImageMarkdown(overrides.image);
 
   if (!channelId || !message) {
     return;
@@ -54,7 +57,7 @@ export async function triggerWelcome(
     }
   }
 
-  let nickname = t(settings.language, "someone");
+  let nickname = t(runtimeLanguage, "someone");
   try {
     const memberRequest: CommunityMemberGetRequest = { userId: userId as any };
     const member: CommunityMember =
@@ -76,7 +79,9 @@ export async function triggerWelcome(
     value: nickname,
   }]);
 
-  const content = message.replace(/\{nickname\}/g, nickname);
+  const content = [message.replace(/\{nickname\}/g, nickname), image]
+    .filter((x): x is string => Boolean(x && x.trim().length > 0))
+    .join("\n");
   const request: ChannelMessageCreateRequest = {
     channelId: channelId as ChannelGuid,
     content,
@@ -98,9 +103,11 @@ export async function triggerGoodbye(
   userId: string,
   settings: RootBotSettings
 ): Promise<void> {
+  const runtimeLanguage = await getRuntimeLanguage(settings.language);
   const overrides = await getOverrides("goodbye");
   let channelId = overrides.channelId;
-  const message = overrides.message ?? "{nickname} saiu da comunidade.";
+  const message = overrides.message ?? "{nickname} left the community.";
+  const image = formatImageMarkdown(overrides.image);
 
   if (!channelId || !message) return;
 
@@ -115,7 +122,7 @@ export async function triggerGoodbye(
     }
   }
 
-  let nickname = t(settings.language, "someone");
+  let nickname = t(runtimeLanguage, "someone");
   try {
     const cached = await rootServer.dataStore.appData.get<string>(
       NICKNAME_CACHE_PREFIX + userId
@@ -125,7 +132,9 @@ export async function triggerGoodbye(
     // Ignore if nickname not cached
   }
 
-  const content = message.replace(/\{nickname\}/g, nickname);
+  const content = [message.replace(/\{nickname\}/g, nickname), image]
+    .filter((x): x is string => Boolean(x && x.trim().length > 0))
+    .join("\n");
   try {
     await rootServer.community.channelMessages.create({
       channelId: channelId as ChannelGuid,
@@ -177,5 +186,16 @@ async function resolveChannelInternal(val: string) {
     });
     if (found) return found;
   }
+  return undefined;
+}
+
+function formatImageMarkdown(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const input = raw.trim().replace(/^<|>$/g, "");
+  const mdRootExternal = input.match(/^\[(https?:\/\/[^\]]+)\]\(root:\/\/external\/[^\)]+\)$/i);
+  if (mdRootExternal?.[1]) return `[image](${mdRootExternal[1]})`;
+  const mdAny = input.match(/^\[[^\]]*\]\((https?:\/\/\S+)\)$/i);
+  if (mdAny?.[1]) return `[image](${mdAny[1]})`;
+  if (/^https?:\/\/\S+$/i.test(input)) return `[image](${input})`;
   return undefined;
 }

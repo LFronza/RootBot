@@ -11,7 +11,7 @@ import {
     CommunityMemberGetRequest,
     CommunityMember,
 } from "@rootsdk/server-bot";
-import { ADMIN_ROLE_KEY } from "./types.js";
+import { ADMIN_ROLE_KEY, MOD_ROLE_KEY, OVERRIDE_ROLE_KEY } from "./types.js";
 
 /**
  * Check if a user has admin permissions.
@@ -49,6 +49,59 @@ export async function hasAdminPermission(userId: string): Promise<boolean> {
     }
 }
 
+export async function hasModeratorPermission(userId: string): Promise<boolean> {
+    if (await hasAdminPermission(userId)) return true;
+    const modRoleId = await getModRoleId();
+    if (!modRoleId) return false;
+    try {
+        const memberRequest: CommunityMemberGetRequest = { userId: userId as any };
+        const member: CommunityMember = await rootServer.community.communityMembers.get(memberRequest);
+        if (!member.communityRoleIds || member.communityRoleIds.length === 0) {
+            return false;
+        }
+        return member.communityRoleIds.includes(modRoleId as CommunityRoleGuid);
+    } catch (err) {
+        if (err instanceof RootApiException) {
+            console.error("[Permissions] RootApiException checking moderator roles:", err.errorCode);
+        } else if (err instanceof Error) {
+            console.error("[Permissions] Error checking moderator roles:", err.message);
+        } else {
+            console.error("[Permissions] Unknown error checking moderator roles:", err);
+        }
+        return false;
+    }
+}
+
+export async function hasOverridePermission(userId: string): Promise<boolean> {
+    const overrideRoleId = await getOverrideRoleId();
+    if (!overrideRoleId) return false;
+    try {
+        const memberRequest: CommunityMemberGetRequest = { userId: userId as any };
+        const member: CommunityMember = await rootServer.community.communityMembers.get(memberRequest);
+        if (!member.communityRoleIds || member.communityRoleIds.length === 0) {
+            return false;
+        }
+        return member.communityRoleIds.includes(overrideRoleId as CommunityRoleGuid);
+    } catch (err) {
+        if (err instanceof RootApiException) {
+            console.error("[Permissions] RootApiException checking override roles:", err.errorCode);
+        } else if (err instanceof Error) {
+            console.error("[Permissions] Error checking override roles:", err.message);
+        } else {
+            console.error("[Permissions] Unknown error checking override roles:", err);
+        }
+        return false;
+    }
+}
+
+export async function hasModerationGuardConfigured(): Promise<boolean> {
+    const [adminRoleId, modRoleId] = await Promise.all([
+        getAdminRoleId(),
+        getModRoleId(),
+    ]);
+    return Boolean(adminRoleId || modRoleId);
+}
+
 /**
  * Get the configured admin role ID.
  * Returns undefined if no admin role is configured.
@@ -76,4 +129,42 @@ export async function setAdminRoleId(roleId: string): Promise<void> {
  */
 export async function clearAdminRole(): Promise<void> {
     await rootServer.dataStore.appData.delete(ADMIN_ROLE_KEY);
+}
+
+export async function getModRoleId(): Promise<string | undefined> {
+    try {
+        return await rootServer.dataStore.appData.get<string>(MOD_ROLE_KEY);
+    } catch {
+        return undefined;
+    }
+}
+
+export async function setModRoleId(roleId: string): Promise<void> {
+    await rootServer.dataStore.appData.set([{
+        key: MOD_ROLE_KEY,
+        value: roleId,
+    }]);
+}
+
+export async function clearModRole(): Promise<void> {
+    await rootServer.dataStore.appData.delete(MOD_ROLE_KEY);
+}
+
+export async function getOverrideRoleId(): Promise<string | undefined> {
+    try {
+        return await rootServer.dataStore.appData.get<string>(OVERRIDE_ROLE_KEY);
+    } catch {
+        return undefined;
+    }
+}
+
+export async function setOverrideRoleId(roleId: string): Promise<void> {
+    await rootServer.dataStore.appData.set([{
+        key: OVERRIDE_ROLE_KEY,
+        value: roleId,
+    }]);
+}
+
+export async function clearOverrideRole(): Promise<void> {
+    await rootServer.dataStore.appData.delete(OVERRIDE_ROLE_KEY);
 }

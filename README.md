@@ -1,95 +1,188 @@
 # APPL-E
 
-Bot para a plataforma [Root](https://rootapp.com), inspirado no [FBK](https://github.com/kabiiQ/FBK) (bot do Discord). Nome atual do bot: **APPL-E**. Funcionalidades principais:
+APPL-E is a Root community bot focused on stream notifications, welcome/goodbye automation, role workflows, and moderation utilities.
 
-- **Notificações de live** – Anuncia quando um streamer entra ao vivo no **YouTube** ou **Twitch** (com opção de mencionar um cargo).
-- **Boas-vindas e despedida** – Mensagens automáticas quando um membro entra ou sai da comunidade (com variável `{nickname}`).
-- **Cargo automático** – Atribui um cargo configurado a todos que entram na comunidade.
-- **Comandos de stream** – No canal de anúncios de live: `!stream add`, `!stream list`, `!stream remove`, `!stream help`.
+## Features
 
-## Requisitos
+- Live alerts for **YouTube** and **Twitch**
+- YouTube new video and premiere announcements
+- Per-community streamer subscriptions (shared global catalog + local subscriptions)
+- Welcome and goodbye messages (text + image)
+- Auto role on join and reaction-based role assignment
+- Admin and moderator role-based permission model
+- AutoMod with keyword/regex rules
+- Moderation actions: mute, unmute, tempban, tempkick
+- Moderation logs channel
+- English and Portuguese support
+- Command prefix customization
 
-- **Node.js 22+**
-- Conta no [Root Developer Portal](https://dev.rootapp.com) para obter o **App ID** e o **DEV_TOKEN** (testes locais).
+## Requirements
 
-## Configuração
+- Node.js 22+
+- A Root app/bot from the [Root Developer Portal](https://dev.rootapp.com)
 
-1. **Clone/abra o projeto** e instale dependências:
+## Local Setup
 
-   ```bash
-   npm install
-   ```
+1. Install dependencies:
 
-2. **Manifest** – Em `root-manifest.json`, substitua `YOUR_APP_ID_FROM_DEVELOPER_PORTAL` pelo ID do seu app no Developer Portal.
+```bash
+npm install
+```
 
-3. **Variáveis de ambiente** (teste local) – Crie um arquivo `.env` na raiz (veja `.env.example`):
+2. Create `.env` in project root:
 
-   ```
-   DEV_TOKEN=seu_token_do_developer_portal
-   COMMUNITY_ID=id_da_comunidade_de_teste
-   ```
+```env
+DEV_TOKEN=your_dev_token
+COMMUNITY_ID=your_test_community_id
+YOUTUBE_API_KEY=optional_for_youtube
+TWITCH_CLIENT_ID=optional_for_twitch
+TWITCH_CLIENT_SECRET=optional_for_twitch
+```
 
-   O `COMMUNITY_ID` é o ID da comunidade onde o bot vai rodar (a comunidade `-test` criada ao gerar o DEV_TOKEN). Você encontra no Developer Portal ou nas configurações da comunidade no app Root.
+3. Build and run:
 
-4. **Build e execução (teste local)**:
+```bash
+npm run build
+npm run bot
+```
 
-   Para testar o bot na sua comunidade de teste, use o **DevHost** da Root (ele sobe um servidor local que conecta com a Root e roda seu bot):
+## Permission Model
 
-   ```bash
-   npm run build
-   npm run bot
-   ```
+- `Admin role`: full bot configuration access.
+- `Mod role`: moderation + automod access.
+- `Override role`: bypasses AutoMod filtering (keywords/regex), but **does not bypass manual moderation commands**.
+- If neither admin role nor mod role is configured, moderation actions are disabled for safety.
 
-   O comando `npm run bot` inicia o DevHost, que lê o `.env` (DEV_TOKEN e COMMUNITY_ID), sobe o ambiente em `127.0.0.1:8090` e executa o APPL-E. Abra o app Root e entre na comunidade de teste para ver o bot em ação.
+## Global Settings (Root App Settings)
 
-   Não use `npm start` para teste local: ele roda só o código do bot, que tenta conectar ao DevHost na porta 8090 e falha com "ECONNREFUSED" se o DevHost não estiver rodando.
+- `Language`: default bot language (`en`/`pt`)
+- `Default command prefix`: global fallback prefix (local prefix can override)
 
-## Configurações do app (na Root)
+## Command Groups
 
-As opções abaixo são definidas pelos administradores da comunidade ao instalar/configurar o bot (Manage Apps).
+All examples assume prefix `!`.
 
-### Geral
+### Core
 
-- **Language / Idioma** – Idioma das mensagens do APPL-E (Português ou English). Afeta anúncios de live, respostas dos comandos `!stream` e o fallback “Alguém”/“Someone” em welcome/goodbye.
+- `!ping` (`!p`)
+- `!help` (`!h`)
 
-### Boas-vindas e despedida
+### General Settings (`!set` / `!s`)
 
-- **Canal de boas-vindas** – Onde enviar a mensagem quando alguém entrar.
-- **Mensagem de boas-vindas** – Use `{nickname}` para o nome do membro.
-- **Canal de despedida** e **Mensagem de despedida** – Idem para quem sair.
+- `!set adminRole <@role|roleId|name>` (`!s ar <...>`)
+- `!set adminRole clear`
+- `!set language <en|pt>` (`!s lg <...>`)
+- `!set debug <on|off>` (`!s d <...>`)
+- `!set prefix <prefix>`
+- `!set autorole <messageId> <emoji> <@role|roleId|name> [one|many]` (`!s atr ...`)
+- `!set autorole <messageId> <@role|roleId|name> [one|many]` (guided setup)
+- `!set autorole remove <messageId> <emoji>` (`!s atr remove ...`)
 
-### Cargos
+### Stream Commands (`!stream` / `!st`)
 
-- **Cargo ao entrar** – Cargo atribuído automaticamente a novos membros.
+Public:
 
-### Notificações de live
+- `!stream list` (`!st l`)
+- `!stream help` (`!st h`)
 
-- **Canal de anúncios de live** – Canal onde o bot publica “X está ao vivo no YouTube/Twitch”.
-- **Cargo para mencionar** – (Opcional) Cargo mencionado nesses anúncios.
-- **YouTube Data API Key** – Chave da [Google Cloud Console](https://console.cloud.google.com/) (YouTube Data API v3).
-- **Twitch Client ID** e **Twitch Client Secret** – Do [Twitch Developer Console](https://dev.twitch.tv/console).
+Admin:
 
-## Comandos de stream (no canal de anúncios)
+- `!stream live [contains]` (`!st v`)
+- `!stream add <name|uid|url> [| Display Name]` (`!st +`)
+- `!stream remove <index>` (`!st -`)
+- `!stream channel <#channel|channelId|name>` (`!st c`)
+- `!stream role <@role|roleId|name>` (`!st r`)
+- `!stream message <text>` (`!st m`)
+- `!stream info` (`!st i`)
+- `!stream test` (`!st t`)
+- `!stream reset` (`!st rs`)
+- `!stream admin <@role|roleId|name>` (`!st ad`)
+- `!stream admin clear`
 
-- `!stream add youtube <channelId> <Nome>` – Adiciona canal YouTube. O **channelId** começa com `UC` (ex.: `UCxxxxxxxx`).
-- `!stream add twitch <userId> <Nome>` – Adiciona canal Twitch. O **userId** é o **ID numérico** do usuário (não o login). Ex.: obter em [Twitch API](https://dev.twitch.tv/docs/api/reference#get-users) ou ferramentas como [Twitch Tracker](https://twitchtracker.com/).
-- `!stream list` – Lista streamers cadastrados.
-- `!stream remove <número>` – Remove pelo índice da lista (use `!stream list` para ver os números).
-- `!stream help` – Mostra a ajuda.
+### Welcome / Goodbye
 
-## Estrutura do projeto
+Welcome (`!welcome` / `!wc`):
 
-- `src/main.ts` – Ponto de entrada, lifecycle e registro dos módulos.
-- `src/welcome.ts` – Boas-vindas e despedida (eventos `CommunityJoined` / `CommunityLeave`).
-- `src/roles.ts` – Cargo automático ao entrar.
-- `src/streams.ts` – Checagem de lives (Job Scheduler + YouTube/Twitch APIs) e anúncios.
-- `src/commands.ts` – Comandos `!stream` no canal de anúncios.
-- `src/types.ts` – Tipos e constantes compartilhados.
-- `src/i18n/` – **Idiomas**: `translations.ts` (textos em pt/en), `index.ts` (função `t(locale, key, params)`). Para adicionar um idioma, veja o comentário no topo de `src/i18n/index.ts`.
-- `root-manifest.json` – Manifest do APPL-E (ID, versão, package, settings, permissions).
+- `!welcome add <channel|message|image> <value>` (`!wc + ...`)
+- `!welcome remove <channel|message|image>` (`!wc - ...`)
+- `!welcome channel <#channel|channelId|name>` (`!wc c ...`)
+- `!welcome message <text>` (`!wc m ...`)
+- `!welcome image <https://... | [image](https://...)>` (`!wc i ...`)
+- `!welcome info` (`!wc i`)
+- `!welcome test` (`!wc t`)
+- `!welcome reset` (`!wc rs`)
 
-## Referências
+Goodbye (`!goodbye` / `!gb`):
 
-- [Root Bot developer home](https://docs.rootapp.com/docs/bot-docs/bot-home/)
+- `!goodbye add <channel|message|image> <value>` (`!gb + ...`)
+- `!goodbye remove <channel|message|image>` (`!gb - ...`)
+- `!goodbye channel <#channel|channelId|name>` (`!gb c ...`)
+- `!goodbye message <text>` (`!gb m ...`)
+- `!goodbye image <https://... | [image](https://...)>` (`!gb i ...`)
+- `!goodbye info` (`!gb i`)
+- `!goodbye test` (`!gb t`)
+- `!goodbye reset` (`!gb rs`)
+
+### AutoMod (`!automod` / `!am`)
+
+- `!automod info`
+- `!automod <delete|kick|ban> <words|regex> <comma,separated,values>`
+- `!automod <delete|kick|ban> clear`
+
+Examples:
+
+- `!am delete words spam,scam`
+- `!am ban regex /discord\.gg\/\w+/i`
+
+### Moderation (`!mod` / `!md`)
+
+Configuration (admin only):
+
+- `!mod role <@role|roleId|name>` (`!md r ...`)
+- `!mod role clear`
+- `!mod override <@role|roleId|name>` (`!md ov ...`)
+- `!mod override clear`
+- `!mod logs <#channel|channelId|name>` (`!md lg ...`)
+- `!mod logs clear`
+
+Actions (mod+admin):
+
+- `!mod mute <@user|userId> <duration> [reason]` (`!md m ...`)
+- `!mod unmute <@user|userId>` (`!md um ...`)
+- `!mod tempban <@user|userId> <duration> [reason]` (`!md tb ...`)
+- `!mod tempkick <@user|userId> <duration> [reason]` (`!md tk ...`)
+
+Duration formats:
+
+- `30` or `30s`
+- `30m`
+- `30h`
+- `2d`
+- Maximum is capped at `7d`.
+
+## Moderation Behavior Notes
+
+- Muted users have new text messages deleted immediately.
+- APPL-E attempts to DM muted users with remaining time (best-effort, SDK/runtime dependent).
+- Mute also attempts to apply server mute on voice channels.
+- If a moderation logs channel is configured, APPL-E logs moderation/config actions there.
+
+## Project Structure
+
+- `src/main.ts`: app lifecycle and module registration
+- `src/commands.ts`: command parsing and handlers
+- `src/streams.ts`: stream polling and announcements
+- `src/streamDiscovery.ts`: input resolution for YouTube/Twitch
+- `src/streamRegistry.ts`: streamer catalog/subscription mapping
+- `src/welcome.ts`: welcome/goodbye logic
+- `src/roles.ts`: join auto-role
+- `src/autorole.ts`: reaction-role mapping and handlers
+- `src/automod.ts`: automod + moderation enforcement
+- `src/permissions.ts`: admin/mod/override permission helpers
+- `src/i18n/translations.ts`: PT/EN text keys
+- `root-manifest.json`: Root app manifest
+
+## References
+
+- [Root Bot Docs](https://docs.rootapp.com/docs/bot-docs/bot-home/)
 - [Root Community API](https://docs.rootapp.com/docs/bot-docs/develop/community-api/)
-- [FBK (Discord)](https://github.com/kabiiQ/FBK) – Inspiração para notificações de live, welcome e cargos.

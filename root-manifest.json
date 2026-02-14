@@ -12,13 +12,59 @@
       ]
     }
   },
+  "settings": {
+    "groups": [
+      {
+        "key": "general",
+        "title": "General",
+        "items": [
+          {
+            "key": "language",
+            "title": "Language",
+            "description": "Default bot language.",
+            "required": false,
+            "confirmation": "Save",
+            "select": {
+              "options": [
+                {
+                  "key": "English",
+                  "value": "en"
+                },
+                {
+                  "key": "Portuguese",
+                  "value": "pt"
+                }
+              ],
+              "values": [
+                "en"
+              ]
+            }
+          },
+          {
+            "key": "commandPrefix",
+            "title": "Default command prefix",
+            "description": "Used when the server has not configured a local prefix.",
+            "required": false,
+            "confirmation": "Save",
+            "text": {
+              "defaultValue": "!"
+            }
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "community": {
-      "ManageRoles": true
+      "ManageRoles": true,
+      "Kick": true,
+      "CreateBan": true,
+      "ManageBans": true
     },
     "channel": {
       "CreateMessage": true,
       "CreateMessageMention": true,
+      "DeleteMessageOther": true,
       "ViewMessageHistory": true,
       "View": true
     }
